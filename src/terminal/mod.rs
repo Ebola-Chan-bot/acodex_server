@@ -12,6 +12,7 @@ use axum::{
 
 use axum::http::HeaderValue;
 use dashmap::DashMap;
+use std::env;
 use std::sync::OnceLock;
 use std::{io::ErrorKind, net::Ipv4Addr, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
@@ -31,15 +32,32 @@ pub fn get_default_command() -> Option<&'static str> {
     DEFAULT_COMMAND.get().map(|s| s.as_str())
 }
 
+fn should_enable_terminal_tracing() -> bool {
+    if env::var_os("RUST_LOG").is_some() {
+        return true;
+    }
+
+    matches!(
+        env::var("AXS_TERMINAL_LOG").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("True")
+    )
+}
+
 pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                format!("{}=error,tower_http=error", env!("CARGO_CRATE_NAME")).into()
-            }),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "off".into());
+
+    if should_enable_terminal_tracing() {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::sink))
+            .init();
+    }
 
     let sessions: Sessions = Arc::new(DashMap::new());
 
