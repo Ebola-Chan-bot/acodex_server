@@ -35,7 +35,7 @@ pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                format!("{}=debug,tower_http=info", env!("CARGO_CRATE_NAME")).into()
+                format!("{}=error,tower_http=error", env!("CARGO_CRATE_NAME")).into()
             }),
         )
         .with(tracing_subscriber::fmt::layer())
