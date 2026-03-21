@@ -303,18 +303,25 @@ async fn handle_socket(socket: WebSocket, pid: u32, sessions: Sessions) {
     // Create output channel for this WS connection
     let (ws_output_tx, mut ws_output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
-    // Set the sender so background reader starts forwarding to us
-    {
-        let mut guard = output_tx_arc.lock().unwrap();
-        *guard = Some(ws_output_tx);
-    }
-
-    // Send full scrollback history (client should clear terminal before connecting)
+    // Send full scrollback history, then atomically enable live forwarding before the
+    // PTY reader can append more bytes to the scrollback file. Without that ordering,
+    // the first session can replay the initial MOTD from scrollback and then receive the
+    // same bytes again from the live channel during the same handshake window.
     let scrollback_for_replay = scrollback.clone();
-    match spawn_blocking(move || scrollback_for_replay.read_tail(MAX_SCROLLBACK_BYTES)).await {
-        Ok(Ok(contents)) if !contents.is_empty() => {
+    let output_tx_for_replay = output_tx_arc.clone();
+    let ws_output_tx_for_replay = ws_output_tx.clone();
+    match spawn_blocking(move || {
+        scrollback_for_replay.read_tail_and_then(MAX_SCROLLBACK_BYTES, || {
+            let mut guard = output_tx_for_replay.lock().unwrap();
+            *guard = Some(ws_output_tx_for_replay);
+        })
+    })
+    .await
+    {
+        Ok(Ok((contents, _))) if !contents.is_empty() => {
             let _ = sender.send(Message::Binary(Bytes::from(contents))).await;
         }
+        Ok(Ok((_contents, _))) => {}
         Ok(Err(e)) => {
             tracing::warn!("Failed to read scrollback for terminal {}: {}", pid, e);
         }
