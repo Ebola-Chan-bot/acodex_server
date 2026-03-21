@@ -33,6 +33,8 @@ pub struct TerminalSession {
     pub scrollback: Arc<Scrollback>,
     pub output_tx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>>,
     pub exit_status: Arc<std::sync::Mutex<Option<bool>>>,
+    pub exit_detail: Arc<std::sync::Mutex<Option<ProcessExitMessage>>>, // 仅调试用
+    pub launch_detail: Arc<String>, // 仅调试用
     pub exit_notify: Arc<tokio::sync::Notify>,
     pub last_accessed: Arc<Mutex<SystemTime>>,
 }
@@ -57,6 +59,9 @@ pub async fn create_terminal(
         }
     }
 
+    let mut pty_backend = String::from("portable_pty"); // 仅调试用
+    let mut pty_open_error = String::new(); // 仅调试用
+    let mut pty_backend_detail = String::from("<none>"); // 仅调试用
     let size = PtySize {
         rows,
         cols,
@@ -96,12 +101,21 @@ pub async fn create_terminal(
     let (master, mut child) = match std_result {
         Ok(pair) => pair,
         Err(e) => {
+            pty_backend = String::from("tiocgptpeer_fallback"); // 仅调试用
+            pty_open_error = e.to_string(); // 仅调试用
             tracing::warn!(
                 "Standard openpty failed ({}), trying TIOCGPTPEER fallback",
                 e
             );
             match fallback_open_and_spawn(size, &program, &args) {
-                Ok(pair) => pair,
+                Ok((master, child, detail)) => { // 仅调试用
+                    pty_backend_detail = detail; // 仅调试用
+                    tracing::info!( // 仅调试用
+                        "TIOCGPTPEER fallback ready backend_detail={}", // 仅调试用
+                        pty_backend_detail, // 仅调试用
+                    ); // 仅调试用
+                    (master, child) // 仅调试用
+                }
                 Err(fb_err) => {
                     tracing::error!("TIOCGPTPEER fallback also failed: {}", fb_err);
                     return Json(ErrorResponse {
@@ -115,7 +129,17 @@ pub async fn create_terminal(
 
     // --- Common session setup ---
     let pid = child.process_id().unwrap_or(0);
-    tracing::info!("Terminal created successfully with PID: {}", pid);
+    let launch_detail = Arc::new(format!( // 仅调试用
+        "program={} args={} pty_backend={} openpty_error={} backend_detail={} cols={} rows={}", // 仅调试用
+        program, // 仅调试用
+        serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string()), // 仅调试用
+        pty_backend, // 仅调试用
+        if pty_open_error.is_empty() { "<none>".to_string() } else { pty_open_error }, // 仅调试用
+        pty_backend_detail, // 仅调试用
+        cols, // 仅调试用
+        rows, // 仅调试用
+    )); // 仅调试用
+    tracing::info!("Terminal created successfully with PID: {} ({})", pid, launch_detail.as_ref()); // 仅调试用
 
     let reader = match master.try_clone_reader() {
         Ok(r) => r,
@@ -148,6 +172,8 @@ pub async fn create_terminal(
     let output_tx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>> =
         Arc::new(std::sync::Mutex::new(None));
     let exit_status: Arc<std::sync::Mutex<Option<bool>>> = Arc::new(std::sync::Mutex::new(None));
+    let exit_detail: Arc<std::sync::Mutex<Option<ProcessExitMessage>>> = // 仅调试用
+        Arc::new(std::sync::Mutex::new(None)); // 仅调试用
     let exit_notify = Arc::new(tokio::sync::Notify::new());
 
     // Background PTY reader — runs for the session lifetime
@@ -179,20 +205,60 @@ pub async fn create_terminal(
     // Background child waiter — signals when process exits
     {
         let exit_status = exit_status.clone();
+        let exit_detail = exit_detail.clone(); // 仅调试用
+        let launch_detail_for_waiter = launch_detail.clone(); // 仅调试用
+        let scrollback_for_waiter = scrollback.clone(); // 仅调试用: capture PTY output on exit
         let exit_notify = exit_notify.clone();
         let child = Arc::new(std::sync::Mutex::new(child));
         spawn_blocking(move || {
             let mut child_guard = child.lock().unwrap();
             let success = match child_guard.wait() {
-                Ok(status) => status.success(),
-                Err(_) => false,
+                Ok(status) => {
+                    // 仅调试用: give PTY reader a moment to flush remaining output to scrollback,
+                    // then capture the tail for diagnostics (critical for exit_code=182 where bash
+                    // dies before producing any visible output)
+                    std::thread::sleep(Duration::from_millis(200));
+                    let scrollback_preview = scrollback_for_waiter // 仅调试用
+                        .read_tail_and_then(2048, || ()) // 仅调试用
+                        .map(|(data, _)| { // 仅调试用
+                            let s = String::from_utf8_lossy(&data); // 仅调试用
+                            if s.len() > 512 { // 仅调试用
+                                format!("...{}", &s[s.len() - 512..]) // 仅调试用
+                            } else { // 仅调试用
+                                s.to_string() // 仅调试用
+                            } // 仅调试用
+                        }) // 仅调试用
+                        .unwrap_or_else(|_| "<read_error>".to_string()); // 仅调试用
+                    let exit_message = ProcessExitMessage { // 仅调试用
+                        exit_code: Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX)), // 仅调试用
+                        signal: status.signal().map(|signal| signal.to_string()), // 仅调试用
+                        message: format!( // 仅调试用
+                            "wait_status={} launch_detail={} scrollback_preview={}", // 仅调试用
+                            status, // 仅调试用
+                            launch_detail_for_waiter.as_ref(), // 仅调试用
+                            scrollback_preview, // 仅调试用
+                        ), // 仅调试用
+                    }; // 仅调试用
+                    let success = status.success();
+                    *exit_detail.lock().unwrap() = Some(exit_message); // 仅调试用
+                    success
+                }
+                Err(error) => {
+                    *exit_detail.lock().unwrap() = Some(ProcessExitMessage { // 仅调试用
+                        exit_code: None, // 仅调试用
+                        signal: None, // 仅调试用
+                        message: format!("wait_error={} launch_detail={}", error, launch_detail_for_waiter.as_ref()), // 仅调试用
+                    }); // 仅调试用
+                    false
+                }
             };
             *exit_status.lock().unwrap() = Some(success);
             exit_notify.notify_waiters();
             tracing::info!(
-                "Background child waiter exited for PID {} (success={})",
+                "Background child waiter exited for PID {} (success={}, detail={:?})", // 仅调试用
                 pid,
-                success
+                success,
+                exit_detail.lock().unwrap().as_ref() // 仅调试用
             );
         });
     }
@@ -204,12 +270,19 @@ pub async fn create_terminal(
         scrollback,
         output_tx,
         exit_status,
+        exit_detail, // 仅调试用
+        launch_detail: launch_detail.clone(), // 仅调试用
         exit_notify,
         last_accessed: Arc::new(Mutex::new(SystemTime::now())),
     };
 
     sessions.insert(pid, session);
-    (axum::http::StatusCode::OK, pid.to_string()).into_response()
+    // 仅调试用: return JSON with launch_detail so frontend can log which PTY backend
+    // each terminal used (critical for diagnosing intermittent fallback failures)
+    Json(serde_json::json!({
+        "pid": pid,
+        "launch_detail": launch_detail.as_ref()
+    })).into_response()
 }
 
 pub async fn resize_terminal(
@@ -256,7 +329,7 @@ pub async fn terminal_websocket(
 async fn handle_socket(socket: WebSocket, pid: u32, sessions: Sessions) {
     let (mut sender, mut receiver) = socket.split();
 
-    let (writer, scrollback, output_tx_arc, exit_status_arc, exit_notify) = {
+    let (writer, scrollback, output_tx_arc, exit_status_arc, exit_detail_arc, launch_detail, exit_notify) = {
         let Some(session) = sessions.get(&pid) else {
             tracing::error!("Session {} not found", pid);
             return;
@@ -270,26 +343,44 @@ async fn handle_socket(socket: WebSocket, pid: u32, sessions: Sessions) {
             session.scrollback.clone(),
             session.output_tx.clone(),
             session.exit_status.clone(),
+            session.exit_detail.clone(), // 仅调试用
+            session.launch_detail.clone(), // 仅调试用
             session.exit_notify.clone(),
         )
     };
+
+    let build_exit_message = || { // 仅调试用
+        let stored_detail = { // 仅调试用
+            let guard = exit_detail_arc.lock().unwrap(); // 仅调试用
+            guard.as_ref().map(|detail| ProcessExitMessage { // 仅调试用
+                exit_code: detail.exit_code, // 仅调试用
+                signal: detail.signal.clone(), // 仅调试用
+                message: detail.message.clone(), // 仅调试用
+            }) // 仅调试用
+        }; // 仅调试用
+        if let Some(detail) = stored_detail { // 仅调试用
+            return detail; // 仅调试用
+        } // 仅调试用
+
+        let success = exit_status_arc.lock().unwrap().unwrap_or(false); // 仅调试用
+        ProcessExitMessage { // 仅调试用
+            exit_code: Some(if success { 0 } else { 1 }), // 仅调试用
+            signal: None, // 仅调试用
+            message: format!( // 仅调试用
+                "{}; launch_detail={}", // 仅调试用
+                if success { "Process exited successfully" } else { "Process exited with non-zero status" }, // 仅调试用
+                launch_detail.as_ref(), // 仅调试用
+            ), // 仅调试用
+        } // 仅调试用
+    }; // 仅调试用
 
     // Check if process already exited
     let already_exited = {
         let guard = exit_status_arc.lock().unwrap();
         *guard
     };
-    if let Some(success) = already_exited {
-        let exit_message = ProcessExitMessage {
-            exit_code: Some(if success { 0 } else { 1 }),
-            signal: None,
-            message: if success {
-                "Process exited successfully"
-            } else {
-                "Process exited with non-zero status"
-            }
-            .to_string(),
-        };
+    if let Some(_success) = already_exited {
+        let exit_message = build_exit_message(); // 仅调试用
         let exit_json = serde_json::to_string(&exit_message).unwrap_or_default();
         let _ = sender
             .send(Message::Text(
@@ -387,17 +478,7 @@ async fn handle_socket(socket: WebSocket, pid: u32, sessions: Sessions) {
                     let _ = sender.send(Message::Binary(Bytes::from(std::mem::take(&mut coalesce_buf)))).await;
                 }
 
-                let success = exit_status_arc.lock().unwrap().unwrap_or(false);
-                let exit_message = ProcessExitMessage {
-                    exit_code: Some(if success { 0 } else { 1 }),
-                    signal: None,
-                    message: if success {
-                        "Process exited successfully"
-                    } else {
-                        "Process exited with non-zero status"
-                    }
-                    .to_string(),
-                };
+                let exit_message = build_exit_message(); // 仅调试用
                 let exit_json = serde_json::to_string(&exit_message).unwrap_or_default();
                 let _ = sender
                     .send(Message::Text(
