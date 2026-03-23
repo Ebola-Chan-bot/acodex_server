@@ -30,6 +30,7 @@ use tokio::task::spawn_blocking;
 struct SessionIoStats { // 仅调试用
     pty_chunks: u64, // 仅调试用
     pty_bytes: u64, // 仅调试用
+    pty_first_chunk_elapsed_ms: Option<u128>, // 仅调试用
     pty_first_preview: Option<String>, // 仅调试用
     pty_last_preview: Option<String>, // 仅调试用
     ws_input_messages: u64, // 仅调试用
@@ -206,13 +207,24 @@ pub async fn create_terminal(
         let scrollback = scrollback.clone();
         let output_tx = output_tx.clone();
         let io_stats = io_stats.clone(); // 仅调试用
+        let pty_reader_started_at = launch_started_at; // 仅调试用
         spawn_blocking(move || {
             let mut reader = reader;
             let mut read_buffer = [0u8; 8192];
+            let reader_exit_reason; // 仅调试用
             loop {
                 let n = match reader.read(&mut read_buffer) {
-                    Ok(n) if n > 0 => n,
-                    _ => break,
+                    Ok(n) => { // 仅调试用
+                        if n == 0 { // 仅调试用
+                            reader_exit_reason = String::from("eof"); // 仅调试用
+                            break; // 仅调试用
+                        } // 仅调试用
+                        n // 仅调试用
+                    } // 仅调试用
+                    Err(error) => { // 仅调试用
+                        reader_exit_reason = format!("read_error={}", error); // 仅调试用
+                        break; // 仅调试用
+                    } // 仅调试用
                 };
 
                 let data = &read_buffer[..n];
@@ -224,7 +236,17 @@ pub async fn create_terminal(
                     stats.pty_bytes += u64::try_from(n).unwrap_or(u64::MAX); // 仅调试用
                     let preview = preview_bytes_for_debug(data); // 仅调试用
                     if stats.pty_first_preview.is_none() { // 仅调试用
+                        // 这里单独记录首个 PTY 字节到达时间，是为了区分“shell 尚未产出首屏输出”和“首屏输出已经出现，但 WS 还没接管导致丢了回放”两类根因。当前 MOTD 丢失现象只看前端首帧不够，需要以后端 PTY 首字节为准。 仅调试用
+                        let first_chunk_elapsed_ms = pty_reader_started_at.elapsed().as_millis(); // 仅调试用
+                        stats.pty_first_chunk_elapsed_ms = Some(first_chunk_elapsed_ms); // 仅调试用
                         stats.pty_first_preview = Some(preview.clone()); // 仅调试用
+                        tracing::warn!( // 仅调试用
+                            "PTY first output pid={} elapsed_ms={} bytes={} preview={}", // 仅调试用
+                            pid, // 仅调试用
+                            first_chunk_elapsed_ms, // 仅调试用
+                            n, // 仅调试用
+                            preview, // 仅调试用
+                        ); // 仅调试用
                     } // 仅调试用
                     stats.pty_last_preview = Some(preview); // 仅调试用
                 } // 仅调试用
@@ -235,7 +257,15 @@ pub async fn create_terminal(
                     }
                 }
             }
-            tracing::info!("Background PTY reader exited for PID {}", pid);
+            let final_stats = io_stats.lock().unwrap().clone(); // 仅调试用
+            // 这里补充 PTY reader 退出原因，是为了把“WebSocket 已连上但从未出现首包输出”的情况继续细分成 EOF、read error 或其他读循环终止。当前 60981 案例已经证明前端没有收到任何数据，下一步必须确认后端 PTY 是否在首包前就结束读取。 仅调试用
+            tracing::warn!( // 仅调试用
+                "Background PTY reader exited for PID {} reason={} elapsed_ms={} io_stats={:?}", // 仅调试用
+                pid, // 仅调试用
+                reader_exit_reason, // 仅调试用
+                pty_reader_started_at.elapsed().as_millis(), // 仅调试用
+                final_stats, // 仅调试用
+            ); // 仅调试用
         });
     }
 
@@ -281,6 +311,18 @@ pub async fn create_terminal(
                             io_stats_for_waiter.lock().unwrap().clone(), // 仅调试用
                         ), // 仅调试用
                     }; // 仅调试用
+                    // Keep a dedicated structured log here because the WebSocket exit event can be
+                    // observed later than the child waiter and may be truncated or normalized by
+                    // intermediate layers. This line preserves the exact backend-side exit detail
+                    // for the specific immediate-exit case where the terminal dies before any
+                    // bootstrap frame becomes visible on the client. 仅调试用
+                    tracing::warn!( // 仅调试用
+                        "Terminal process exit detail pid={} exit_code={:?} signal={:?} message={}", // 仅调试用
+                        pid, // 仅调试用
+                        exit_message.exit_code, // 仅调试用
+                        exit_message.signal, // 仅调试用
+                        exit_message.message, // 仅调试用
+                    ); // 仅调试用
                     let success = status.success();
                     *exit_detail.lock().unwrap() = Some(exit_message); // 仅调试用
                     success
@@ -455,9 +497,29 @@ async fn handle_socket(socket: WebSocket, pid: u32, sessions: Sessions) {
     .await
     {
         Ok(Ok((contents, _))) if !contents.is_empty() => {
+            // 这里必须把 replay 字节数和当时的 PTY 统计一起打出来，否则下次再出现“只有 prompt、没有 MOTD”时，无法判断是 PTY 根本没产出，还是 PTY 已经产出但 WS 接管时只回放到了尾部。 仅调试用
+            let replay_preview = preview_bytes_for_debug(&contents); // 仅调试用
+            let replay_bytes = contents.len(); // 仅调试用
+            let replay_stats = io_stats_arc.lock().unwrap().clone(); // 仅调试用
+            tracing::warn!( // 仅调试用
+                "WS replay handshake pid={} replay_bytes={} replay_preview={} io_stats={:?} launch_detail={}", // 仅调试用
+                pid, // 仅调试用
+                replay_bytes, // 仅调试用
+                replay_preview, // 仅调试用
+                replay_stats, // 仅调试用
+                launch_detail.as_ref(), // 仅调试用
+            ); // 仅调试用
             let _ = sender.send(Message::Binary(Bytes::from(contents))).await;
         }
-        Ok(Ok((_contents, _))) => {}
+        Ok(Ok((_contents, _))) => {
+            // 空 replay 也必须记录，因为它和“PTY 首字节已经到达”的组合，正是判断首屏输出在订阅前后是否丢失的关键证据。 仅调试用
+            tracing::warn!( // 仅调试用
+                "WS replay handshake pid={} replay_bytes=0 io_stats={:?} launch_detail={}", // 仅调试用
+                pid, // 仅调试用
+                io_stats_arc.lock().unwrap().clone(), // 仅调试用
+                launch_detail.as_ref(), // 仅调试用
+            ); // 仅调试用
+        }
         Ok(Err(e)) => {
             tracing::warn!("Failed to read scrollback for terminal {}: {}", pid, e);
         }
@@ -525,6 +587,15 @@ async fn handle_socket(socket: WebSocket, pid: u32, sessions: Sessions) {
 
                 let exit_message = build_exit_message(); // 仅调试用
                 let exit_json = serde_json::to_string(&exit_message).unwrap_or_default();
+                // Mirror the exact payload that is about to be emitted so the next reproduction can
+                // distinguish backend data loss from frontend parsing/logging loss. The current
+                // symptom shows only a generic exit message in the browser log even though the
+                // backend child waiter builds richer detail for early exit-1 failures. 仅调试用
+                tracing::warn!( // 仅调试用
+                    "Sending terminal exit event pid={} payload={}", // 仅调试用
+                    pid, // 仅调试用
+                    exit_json, // 仅调试用
+                ); // 仅调试用
                 let _ = sender
                     .send(Message::Text(
                         format!("{{\"type\":\"exit\",\"data\":{exit_json}}}").into(),
