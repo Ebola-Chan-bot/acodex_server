@@ -276,6 +276,7 @@ pub async fn create_terminal(
         let launch_detail_for_waiter = launch_detail.clone(); // 仅调试用
         let scrollback_for_waiter = scrollback.clone(); // 仅调试用: capture PTY output on exit
         let io_stats_for_waiter = io_stats.clone(); // 仅调试用
+        let sessions_for_waiter = sessions.clone(); // 仅调试用: signal 54 forensics — log concurrent session state on abnormal exit
         let child_started_at = Instant::now(); // 仅调试用
         let exit_notify = exit_notify.clone();
         let child = Arc::new(std::sync::Mutex::new(child));
@@ -323,6 +324,28 @@ pub async fn create_terminal(
                         exit_message.signal, // 仅调试用
                         exit_message.message, // 仅调试用
                     ); // 仅调试用
+                    // 仅调试用: signal 54 forensics — when exit_code > 128, log concurrent
+                    // session count, all active PIDs, and axs process signal state from
+                    // /proc/self/status to identify who sent signal 54 and what the
+                    // race condition involves.
+                    if let Some(ec) = exit_message.exit_code { // 仅调试用
+                        if ec > 128 { // 仅调试用
+                            let active_pids: Vec<u32> = sessions_for_waiter // 仅调试用
+                                .iter() // 仅调试用
+                                .map(|r| *r.key()) // 仅调试用
+                                .collect(); // 仅调试用
+                            let axs_sig_status = std::fs::read_to_string("/proc/self/status") // 仅调试用
+                                .unwrap_or_default() // 仅调试用
+                                .lines() // 仅调试用
+                                .filter(|l| l.starts_with("Sig") || l.starts_with("Name") || l.starts_with("Pid") || l.starts_with("PPid") || l.starts_with("Tgid")) // 仅调试用
+                                .collect::<Vec<&str>>() // 仅调试用
+                                .join(" | "); // 仅调试用
+                            tracing::warn!( // 仅调试用
+                                "Signal forensics pid={} exit_code={} concurrent_sessions={} active_pids={:?} axs_proc_status=[{}]", // 仅调试用
+                                pid, ec, sessions_for_waiter.len(), active_pids, axs_sig_status, // 仅调试用
+                            ); // 仅调试用
+                        } // 仅调试用
+                    } // 仅调试用
                     let success = status.success();
                     *exit_detail.lock().unwrap() = Some(exit_message); // 仅调试用
                     success

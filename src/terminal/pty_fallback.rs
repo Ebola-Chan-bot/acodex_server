@@ -362,8 +362,18 @@ pub fn fallback_open_and_spawn(
                 ] {
                     libc::signal(*signo, libc::SIG_DFL);
                 }
-                let empty_set: libc::sigset_t = std::mem::zeroed();
-                libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
+
+                // Block (not ignore) signal 54 to keep bash alive for signal state
+                // inspection from initrc. Under proot ptrace, concurrent PTY sessions
+                // cause signal 54 to arrive during bash's first ~6ms, killing it with
+                // exit 182 (128+54). Blocking defers delivery: if initrc reads
+                // /proc/self/status SigPnd and bit 53 is set, the signal was sent.
+                // SIG_SETMASK clears all inherited blocks, then adds only signal 54.
+                // Diagnostic-only — will be replaced once signal source is identified.
+                let mut diag_mask: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut diag_mask);
+                libc::sigaddset(&mut diag_mask, 54);
+                libc::sigprocmask(libc::SIG_SETMASK, &diag_mask, std::ptr::null_mut());
 
                 // New session
                 if libc::setsid() == -1 {
@@ -392,9 +402,35 @@ pub fn fallback_open_and_spawn(
                         let _ = libc::write(2, b"[axs:tty=n".as_ptr() as *const _, 10);
                     }
                     if pgrp >= 0 {
-                        let _ = libc::write(2, b",pgrp=ok]\n".as_ptr() as *const _, 10);
+                        let _ = libc::write(2, b",pgrp=ok".as_ptr() as *const _, 8);
                     } else {
-                        let _ = libc::write(2, b",pgrp=er]\n".as_ptr() as *const _, 10);
+                        let _ = libc::write(2, b",pgrp=er".as_ptr() as *const _, 8);
+                    }
+
+                    // 仅调试用: 测试 tcsetpgrp — bash 启动时会调用此操作做 job control
+                    // 初始化。已排除 tcsetpgrp 为崩溃根因：日志显示 setpg=ok 但 bash 仍以
+                    // exit_code=182 退出。根因是 proot ptrace 下并发 PTY 时 signal 54 被递送
+                    // 到 bash（已在上方通过 SIG_BLOCK 阻塞，待诊断确认来源后处理）。
+                    // 此探针保留用于回归验证。
+                    let mypid = libc::getpid();
+                    let setpgrp_rc = libc::tcsetpgrp(0, mypid);
+                    if setpgrp_rc == 0 {
+                        let _ = libc::write(2, b",setpg=ok,sig54=blk]\n".as_ptr() as *const _, 22);
+                    } else {
+                        let errno = *libc::__errno_location();
+                        let _ = libc::write(2, b",setpg=e".as_ptr() as *const _, 8);
+                        // Write errno as decimal digits (async-signal-safe)
+                        let mut buf = [0u8; 4];
+                        let mut val = errno as u32;
+                        let mut pos = buf.len();
+                        loop {
+                            pos -= 1;
+                            buf[pos] = b'0' + (val % 10) as u8;
+                            val /= 10;
+                            if val == 0 { break; }
+                        }
+                        let _ = libc::write(2, buf[pos..].as_ptr() as *const _, (buf.len() - pos) as _);
+                        let _ = libc::write(2, b"]\n".as_ptr() as *const _, 2);
                     }
                 }
 
