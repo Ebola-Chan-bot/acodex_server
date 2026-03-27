@@ -10,6 +10,8 @@ use portable_pty::{Child, MasterPty, PtySize};
 use std::cell::RefCell;
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::thread; // 仅调试用
+use std::time::Duration; // 仅调试用
 
 fn describe_pts_fd(fd: RawFd) -> String {
     let mut buffer = [0u8; 128]; // 仅调试用
@@ -85,6 +87,108 @@ impl Read for OwnedFd {
         }
     }
 }
+
+fn summarize_proc_cmdline(bytes: &[u8]) -> String { // 仅调试用
+    let parts = bytes // 仅调试用
+        .split(|byte| *byte == 0) // 仅调试用
+        .filter(|part| !part.is_empty()) // 仅调试用
+        .map(|part| String::from_utf8_lossy(part).into_owned()) // 仅调试用
+        .collect::<Vec<_>>(); // 仅调试用
+    if parts.is_empty() { // 仅调试用
+        return String::from("<empty>"); // 仅调试用
+    } // 仅调试用
+    parts.join(" ") // 仅调试用
+} // 仅调试用
+
+fn collect_child_proc_snapshot(pid: u32) -> String { // 仅调试用
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")) // 仅调试用
+        .map(|status| { // 仅调试用
+            status // 仅调试用
+                .lines() // 仅调试用
+                .filter(|line| { // 仅调试用
+                    line.starts_with("Name") // 仅调试用
+                        || line.starts_with("State") // 仅调试用
+                        || line.starts_with("Tgid") // 仅调试用
+                        || line.starts_with("Pid") // 仅调试用
+                        || line.starts_with("PPid") // 仅调试用
+                        || line.starts_with("TracerPid") // 仅调试用
+                        || line.starts_with("SigQ") // 仅调试用
+                        || line.starts_with("SigPnd") // 仅调试用
+                        || line.starts_with("ShdPnd") // 仅调试用
+                        || line.starts_with("SigBlk") // 仅调试用
+                        || line.starts_with("SigIgn") // 仅调试用
+                        || line.starts_with("SigCgt") // 仅调试用
+                }) // 仅调试用
+                .collect::<Vec<_>>() // 仅调试用
+                .join(" | ") // 仅调试用
+        }) // 仅调试用
+        .unwrap_or_else(|error| format!("<status_error={error}>")); // 仅调试用
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")) // 仅调试用
+        .map(|bytes| summarize_proc_cmdline(&bytes)) // 仅调试用
+        .unwrap_or_else(|error| format!("<cmdline_error={error}>")); // 仅调试用
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")) // 仅调试用
+        .map(|path| path.display().to_string()) // 仅调试用
+        .unwrap_or_else(|error| format!("<exe_error={error}>")); // 仅调试用
+    format!("exe={} cmdline={} [{}]", exe, cmdline, status) // 仅调试用
+} // 仅调试用
+
+fn spawn_child_status_probe(pid: u32) { // 仅调试用
+    tracing::warn!( // 仅调试用
+        "PTY child early-status armed pid={} rounds=6 interval_ms=2 revision=20260327b", // 仅调试用
+        pid, // 仅调试用
+    ); // 仅调试用
+    thread::spawn(move || { // 仅调试用
+        for round in 1..=6 { // 仅调试用
+            let status_path = format!("/proc/{pid}/status"); // 仅调试用
+            match std::fs::read_to_string(&status_path) { // 仅调试用
+                Ok(status) => { // 仅调试用
+                    let snapshot = status // 仅调试用
+                        .lines() // 仅调试用
+                        .filter(|line| { // 仅调试用
+                            line.starts_with("Name") // 仅调试用
+                                || line.starts_with("State") // 仅调试用
+                                || line.starts_with("Tgid") // 仅调试用
+                                || line.starts_with("Pid") // 仅调试用
+                                || line.starts_with("PPid") // 仅调试用
+                                || line.starts_with("TracerPid") // 仅调试用
+                                || line.starts_with("SigQ") // 仅调试用
+                                || line.starts_with("SigPnd") // 仅调试用
+                                || line.starts_with("ShdPnd") // 仅调试用
+                                || line.starts_with("SigBlk") // 仅调试用
+                                || line.starts_with("SigIgn") // 仅调试用
+                                || line.starts_with("SigCgt") // 仅调试用
+                        }) // 仅调试用
+                        .collect::<Vec<_>>() // 仅调试用
+                        .join(" | "); // 仅调试用
+                    tracing::warn!( // 仅调试用
+                        "PTY child early-status pid={} round={} {}", // 仅调试用
+                        pid, // 仅调试用
+                        round, // 仅调试用
+                        collect_child_proc_snapshot(pid), // 仅调试用
+                    ); // 仅调试用
+                } // 仅调试用
+                Err(error) if error.kind() == io::ErrorKind::NotFound => { // 仅调试用
+                    tracing::warn!( // 仅调试用
+                        "PTY child early-status pid={} round={} proc-missing", // 仅调试用
+                        pid, // 仅调试用
+                        round, // 仅调试用
+                    ); // 仅调试用
+                    break; // 仅调试用
+                } // 仅调试用
+                Err(error) => { // 仅调试用
+                    tracing::warn!( // 仅调试用
+                        "PTY child early-status pid={} round={} read_error={}", // 仅调试用
+                        pid, // 仅调试用
+                        round, // 仅调试用
+                        error, // 仅调试用
+                    ); // 仅调试用
+                    break; // 仅调试用
+                } // 仅调试用
+            } // 仅调试用
+            thread::sleep(Duration::from_millis(2)); // 仅调试用
+        } // 仅调试用
+    }); // 仅调试用
+} // 仅调试用
 
 impl Write for OwnedFd {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -415,7 +519,8 @@ pub fn fallback_open_and_spawn(
                     let mypid = libc::getpid();
                     let setpgrp_rc = libc::tcsetpgrp(0, mypid);
                     if setpgrp_rc == 0 {
-                        let _ = libc::write(2, b",setpg=ok,sig54=blk]\n".as_ptr() as *const _, 22);
+                        // 仅调试用: 这里必须与字面量真实长度一致；之前多写 1 字节会把相邻内存里的杂字节带进首帧，污染 182 退出样本。
+                        let _ = libc::write(2, b",setpg=ok,sig54=blk]\n".as_ptr() as *const _, 21); // 仅调试用
                     } else {
                         let errno = *libc::__errno_location();
                         let _ = libc::write(2, b",setpg=e".as_ptr() as *const _, 8);
@@ -446,6 +551,18 @@ pub fn fallback_open_and_spawn(
         child.process_id(), // 仅调试用
         fallback_detail, // 仅调试用
     ); // 仅调试用
+    // 仅调试用: 现有证据显示 child 已带着 `sig54=blk` 进入 bash 早期窗口，
+    // 但仍可能在约 7ms 内直接退出 182。这里从父进程侧抓取前几毫秒的
+    // /proc/<pid>/status，确认失败样本是否真的出现 SigPnd/SigBlk 变化，
+    // 避免继续把旧的 signal 54 假设当成既定事实。
+    if let Some(child_pid) = child.process_id() { // 仅调试用
+        tracing::warn!( // 仅调试用
+            "PTY child immediate-snapshot pid={} {}", // 仅调试用
+            child_pid, // 仅调试用
+            collect_child_proc_snapshot(child_pid), // 仅调试用
+        ); // 仅调试用
+        spawn_child_status_probe(child_pid); // 仅调试用
+    } // 仅调试用
 
     // Detach child stdio handles (master side is our I/O path)
     child.stdin.take();
