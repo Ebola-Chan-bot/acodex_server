@@ -121,6 +121,30 @@ fn proc_exe_snapshot(pid: u32) -> String {
         .unwrap_or_else(|error| format!("<exe_error={error}>"))
 }
 
+fn proc_maps_snapshot(pid: u32) -> String {
+    fs::read_to_string(format!("/proc/{pid}/maps"))
+        .map(|maps| {
+            let interesting = maps
+                .lines()
+                .filter(|line| {
+                    line.contains("/bin/bash")
+                        || line.contains("libproot")
+                        || line.contains("ld-musl")
+                        || line.contains("linker")
+                        || line.contains("[vdso]")
+                        || line.contains(" r-xp ")
+                })
+                .take(12)
+                .collect::<Vec<_>>();
+            if interesting.is_empty() {
+                maps.lines().take(6).collect::<Vec<_>>().join(" || ")
+            } else {
+                interesting.join(" || ")
+            }
+        })
+        .unwrap_or_else(|error| format!("<maps_error={error}>"))
+}
+
 fn describe_wait_semantics(exit_code: Option<i32>, wait_signal: Option<i32>) -> String {
     let inferred_signal = exit_code.and_then(|code| (code > 128).then_some(code - 128));
     let termination_kind = if wait_signal.is_some() {
@@ -169,51 +193,94 @@ fn should_log_attempt(attempt: u32) -> bool {
 
 fn sample_process(pid: u32, rounds: u32, interval_ms: u64) -> Vec<String> {
     let mut lines = Vec::new();
+    let started_at = Instant::now();
+    let mut last_identity: Option<String> = None;
 
     for round in 1..=rounds {
+        let elapsed_ms = started_at.elapsed().as_millis();
         if !proc_exists(pid) {
             lines.push(format!(
-                "[execprobe:sample-missing,round={},pid={}]",
-                round, pid,
+                "[execprobe:sample-missing,round={},elapsed_ms={},pid={}]",
+                round, elapsed_ms, pid,
             ));
             break;
         }
 
+        let status_snapshot = proc_status_snapshot(pid);
+        let stat_snapshot = proc_stat_snapshot(pid);
+        let cmdline_snapshot = proc_cmdline_snapshot(pid);
+        let exe_snapshot = proc_exe_snapshot(pid);
+        let wchan_snapshot = proc_wchan_snapshot(pid);
+        let children_snapshot = proc_children_snapshot(pid);
+        let identity = format!(
+            "stat=[{}] cmdline=[{}] exe=[{}]",
+            stat_snapshot, cmdline_snapshot, exe_snapshot,
+        );
+
+        // When the failing window is only a few milliseconds wide, plain per-round /proc
+        // dumps are hard to align after the fact. Emit elapsed time on every sample and a
+        // dedicated identity-change record whenever exec hands off to a different image, so
+        // the next repro can tell exactly which native boundary was crossed last.
         lines.push(format!(
-            "[execprobe:sample-status,round={},pid={}] {}",
+            "[execprobe:sample-round,round={},elapsed_ms={},pid={}]",
+            round, elapsed_ms, pid,
+        ));
+        if round == 1 || last_identity.as_deref() != Some(identity.as_str()) {
+            lines.push(format!(
+                "[execprobe:sample-identity-change,round={},elapsed_ms={},pid={}] {}",
+                round, elapsed_ms, pid, identity,
+            ));
+            lines.push(format!(
+                "[execprobe:sample-maps,round={},elapsed_ms={},pid={}] {}",
+                round,
+                elapsed_ms,
+                pid,
+                proc_maps_snapshot(pid),
+            ));
+            last_identity = Some(identity);
+        }
+
+        lines.push(format!(
+            "[execprobe:sample-status,round={},elapsed_ms={},pid={}] {}",
             round,
+            elapsed_ms,
             pid,
-            proc_status_snapshot(pid),
+            status_snapshot,
         ));
         lines.push(format!(
-            "[execprobe:sample-stat,round={},pid={}] {}",
+            "[execprobe:sample-stat,round={},elapsed_ms={},pid={}] {}",
             round,
+            elapsed_ms,
             pid,
-            proc_stat_snapshot(pid),
+            stat_snapshot,
         ));
         lines.push(format!(
-            "[execprobe:sample-cmdline,round={},pid={}] {}",
+            "[execprobe:sample-cmdline,round={},elapsed_ms={},pid={}] {}",
             round,
+            elapsed_ms,
             pid,
-            proc_cmdline_snapshot(pid),
+            cmdline_snapshot,
         ));
         lines.push(format!(
-            "[execprobe:sample-exe,round={},pid={}] {}",
+            "[execprobe:sample-exe,round={},elapsed_ms={},pid={}] {}",
             round,
+            elapsed_ms,
             pid,
-            proc_exe_snapshot(pid),
+            exe_snapshot,
         ));
         lines.push(format!(
-            "[execprobe:sample-wchan,round={},pid={}] {}",
+            "[execprobe:sample-wchan,round={},elapsed_ms={},pid={}] {}",
             round,
+            elapsed_ms,
             pid,
-            proc_wchan_snapshot(pid),
+            wchan_snapshot,
         ));
         lines.push(format!(
-            "[execprobe:sample-children,round={},pid={}] {}",
+            "[execprobe:sample-children,round={},elapsed_ms={},pid={}] {}",
             round,
+            elapsed_ms,
             pid,
-            proc_children_snapshot(pid),
+            children_snapshot,
         ));
 
         if round < rounds {
@@ -232,6 +299,7 @@ fn build_wrapped_command(
     command: &[String],
     wrap_sig54_probe: bool,
     arm_ms: u64,
+    sig54_probe_preserve_blocked_on_exec: bool,
 ) -> anyhow::Result<Vec<String>> {
     if !wrap_sig54_probe {
         return Ok(command.to_vec());
@@ -244,6 +312,9 @@ fn build_wrapped_command(
     wrapped.push("54".to_string());
     wrapped.push("--arm-ms".to_string());
     wrapped.push(arm_ms.to_string());
+    if sig54_probe_preserve_blocked_on_exec {
+        wrapped.push("--preserve-blocked-on-exec".to_string());
+    }
     wrapped.push("--".to_string());
     wrapped.extend(command.iter().cloned());
     Ok(wrapped)
@@ -256,6 +327,7 @@ pub fn run_exec_probe(
     sample_rounds: u32,
     sample_interval_ms: u64,
     wrap_sig54_probe: bool,
+    sig54_probe_preserve_blocked_on_exec: bool,
     arm_ms: u64,
     command: Vec<String>,
 ) -> anyhow::Result<ExecProbeOutcome> {
@@ -272,7 +344,7 @@ pub fn run_exec_probe(
     let pid = std::process::id();
     let parent_pid = unsafe { libc::getppid() };
     eprintln!(
-        "[execprobe:start,pid={},ppid={},stop_on_exit_code={},max_attempts={},pause_ms={},sample_rounds={},sample_interval_ms={},wrap_sig54_probe={},arm_ms={},command={}]",
+        "[execprobe:start,pid={},ppid={},stop_on_exit_code={},max_attempts={},pause_ms={},sample_rounds={},sample_interval_ms={},wrap_sig54_probe={},sig54_probe_preserve_blocked_on_exec={},arm_ms={},command={}]",
         pid,
         parent_pid,
         stop_on_exit_code,
@@ -281,6 +353,7 @@ pub fn run_exec_probe(
         sample_rounds,
         sample_interval_ms,
         if wrap_sig54_probe { 1 } else { 0 },
+        if sig54_probe_preserve_blocked_on_exec { 1 } else { 0 },
         arm_ms,
         command_preview(&command),
     );
@@ -310,7 +383,12 @@ pub fn run_exec_probe(
         }
 
         attempt += 1;
-        let wrapped_command = build_wrapped_command(&command, wrap_sig54_probe, arm_ms)?;
+        let wrapped_command = build_wrapped_command(
+            &command,
+            wrap_sig54_probe,
+            arm_ms,
+            sig54_probe_preserve_blocked_on_exec,
+        )?;
         if should_log_attempt(attempt) {
             eprintln!(
                 "[execprobe:attempt-begin,index={},command={}]",
@@ -339,20 +417,24 @@ pub fn run_exec_probe(
             )]
         });
 
-        let exit_code = output.status.code();
-        let wait_signal = output.status.signal();
+        let wait_status = output.status.to_string(); // 仅调试用
+        let exit_code = output.status.code(); // 仅调试用
+        let wait_signal = output.status.signal(); // 仅调试用
+        let status_success = output.status.success(); // 仅调试用
+        let raw_wait_status = output.status.into_raw(); // 仅调试用
         let effective_code = effective_exit_code(exit_code, wait_signal);
         let wait_semantics = describe_wait_semantics(exit_code, wait_signal);
         let triggered = effective_code == Some(stop_on_exit_code);
-        let should_dump = triggered || should_log_attempt(attempt) || !output.status.success();
+        let should_dump = triggered || should_log_attempt(attempt) || !status_success; // 仅调试用
 
         if should_dump {
             eprintln!(
-                "[execprobe:attempt-end,index={},pid={},runtime_ms={},wait_status={},exit_code={:?},wait_signal={:?},effective_exit_code={:?},triggered={},{}]",
+            "[execprobe:attempt-end,index={},pid={},runtime_ms={},wait_status={},raw_wait_status={},exit_code={:?},wait_signal={:?},effective_exit_code={:?},triggered={},{}]",
                 attempt,
                 child_pid,
                 runtime_ms,
-                output.status,
+            wait_status,
+            raw_wait_status,
                 exit_code,
                 wait_signal,
                 effective_code,

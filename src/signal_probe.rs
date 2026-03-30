@@ -89,7 +89,14 @@ fn wait_for_signal(
     }
 }
 
-fn exec_command(command: &[String], old_mask: &libc::sigset_t) -> anyhow::Result<()> {
+fn exec_command(
+    command: &[String],
+    old_mask: &libc::sigset_t,
+    signal: i32,
+    preserve_blocked_on_exec: bool,
+) -> anyhow::Result<()> {
+    let pid = std::process::id();
+    let preview = command_preview(command);
     let cstrings = command
         .iter()
         .map(|arg| CString::new(arg.as_str()).with_context(|| format!("command contains NUL byte: {arg:?}")))
@@ -97,22 +104,45 @@ fn exec_command(command: &[String], old_mask: &libc::sigset_t) -> anyhow::Result
     let mut argv = cstrings.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
     argv.push(std::ptr::null());
 
+    let mut exec_mask = *old_mask;
+    if preserve_blocked_on_exec {
+        unsafe {
+            libc::sigaddset(&mut exec_mask, signal);
+        }
+    }
+
     // Restore the exact mask inherited from axs before exec. The passive line already
     // observes bash under that inherited mask, so the active probe must hand off the
     // same signal state after its arm window instead of introducing a second variable.
-    let setmask_rc = unsafe { libc::sigprocmask(libc::SIG_SETMASK, old_mask, std::ptr::null_mut()) };
+    // 仅调试用: signal catcher target 需要把 54 保持为 blocked 跨过 exec，才能在
+    // 新进程一进入用户态时先装 handler 再放行 54。默认仍保持旧行为，避免污染原始
+    // bash 路径的对照样本。 
+    let setmask_rc = unsafe { libc::sigprocmask(libc::SIG_SETMASK, &exec_mask, std::ptr::null_mut()) };
     if setmask_rc != 0 {
         return Err(anyhow!(io::Error::last_os_error()));
     }
+
+    // 仅调试用: 当前最大歧义是“timeout 后根本没进入 exec”与“已经 handoff 给
+    // 被测命令，182 发生在 handoff 之后”混在一起。这里在 execvp 前打出唯一标记，
+    // 以后只要日志里出现它且随后没有 sigprobe:error，就能确认 182 不属于 probe
+    // 自己的 pre-exec 阶段。
+    eprintln!("[sigprobe:exec-handoff,pid={},command={}]", pid, preview);
 
     unsafe {
         libc::execvp(cstrings[0].as_ptr(), argv.as_ptr());
     }
 
-    Err(anyhow!(io::Error::last_os_error()))
+    let error = io::Error::last_os_error();
+    eprintln!("[sigprobe:exec-error,pid={},command={},error={}]", pid, preview, error);
+    Err(anyhow!(error))
 }
 
-pub fn run_signal_probe(signal: i32, arm_ms: u64, command: Vec<String>) -> anyhow::Result<()> {
+pub fn run_signal_probe(
+    signal: i32,
+    arm_ms: u64,
+    preserve_blocked_on_exec: bool,
+    command: Vec<String>,
+) -> anyhow::Result<()> {
     if signal <= 0 {
         bail!("signal must be positive");
     }
@@ -208,7 +238,7 @@ pub fn run_signal_probe(signal: i32, arm_ms: u64, command: Vec<String>) -> anyho
                 pid,
                 proc_signal_snapshot(pid as libc::pid_t),
             );
-            exec_command(&command, &old_mask)
+            exec_command(&command, &old_mask, signal, preserve_blocked_on_exec)
         }
     }
 }

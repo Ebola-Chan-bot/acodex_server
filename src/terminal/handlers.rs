@@ -47,6 +47,48 @@ fn preview_bytes_for_debug(data: &[u8]) -> String { // 仅调试用
     } // 仅调试用
 } // 仅调试用
 
+fn spawn_process_snapshot(pid: u32) -> String { // 仅调试用
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")) // 仅调试用
+        .map(|status| { // 仅调试用
+            status // 仅调试用
+                .lines() // 仅调试用
+                .filter(|line| { // 仅调试用
+                    line.starts_with("Name") // 仅调试用
+                        || line.starts_with("State") // 仅调试用
+                        || line.starts_with("Tgid") // 仅调试用
+                        || line.starts_with("Pid") // 仅调试用
+                        || line.starts_with("PPid") // 仅调试用
+                        || line.starts_with("TracerPid") // 仅调试用
+                        || line.starts_with("SigQ") // 仅调试用
+                        || line.starts_with("SigPnd") // 仅调试用
+                        || line.starts_with("ShdPnd") // 仅调试用
+                        || line.starts_with("SigBlk") // 仅调试用
+                        || line.starts_with("SigIgn") // 仅调试用
+                        || line.starts_with("SigCgt") // 仅调试用
+                }) // 仅调试用
+                .collect::<Vec<_>>() // 仅调试用
+                .join(" | ") // 仅调试用
+        }) // 仅调试用
+        .unwrap_or_else(|error| format!("<status_error={error}>")); // 仅调试用
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")) // 仅调试用
+        .map(|stat| stat.trim().to_string()) // 仅调试用
+        .unwrap_or_else(|error| format!("<stat_error={error}>")); // 仅调试用
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")) // 仅调试用
+        .map(|raw| { // 仅调试用
+            raw // 仅调试用
+                .split(|byte| *byte == 0) // 仅调试用
+                .filter(|part| !part.is_empty()) // 仅调试用
+                .map(|part| String::from_utf8_lossy(part).into_owned()) // 仅调试用
+                .collect::<Vec<_>>() // 仅调试用
+                .join(" ") // 仅调试用
+        }) // 仅调试用
+        .unwrap_or_else(|error| format!("<cmdline_error={error}>")); // 仅调试用
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")) // 仅调试用
+        .map(|path| path.display().to_string()) // 仅调试用
+        .unwrap_or_else(|error| format!("<exe_error={error}>")); // 仅调试用
+    format!("status=[{}] stat=[{}] cmdline=[{}] exe=[{}]", status, stat, cmdline, exe) // 仅调试用
+} // 仅调试用
+
 fn describe_wait_semantics(exit_code: Option<i32>, wait_signal: Option<i32>) -> String { // 仅调试用
     // Keep 182 interpretation in one place so the investigation stops treating
     // `128 + 54` as automatic proof. We need to separate "wait observed SIG54"
@@ -181,7 +223,8 @@ pub async fn create_terminal(
     // --- Common session setup ---
     let pid = child.process_id().unwrap_or(0);
     let launch_detail = Arc::new(format!( // 仅调试用
-        "program={} args={} pty_backend={} openpty_error={} backend_detail={} cols={} rows={} launch_elapsed_ms={}", // 仅调试用
+        "default_command={} program={} args={} pty_backend={} openpty_error={} backend_detail={} cols={} rows={} launch_elapsed_ms={}", // 仅调试用
+        get_default_command().unwrap_or("<none>"), // 仅调试用
         program, // 仅调试用
         serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string()), // 仅调试用
         pty_backend, // 仅调试用
@@ -191,6 +234,26 @@ pub async fn create_terminal(
         rows, // 仅调试用
         launch_started_at.elapsed().as_millis(), // 仅调试用
     )); // 仅调试用
+    if pid != 0 { // 仅调试用
+        tracing::warn!( // 仅调试用
+            "Terminal spawn snapshot pid={} snapshot={} launch_detail={}", // 仅调试用
+            pid, // 仅调试用
+            spawn_process_snapshot(pid), // 仅调试用
+            launch_detail.as_ref(), // 仅调试用
+        ); // 仅调试用
+        let launch_detail_for_probe = launch_detail.clone(); // 仅调试用
+        let delayed_probe_started_at = launch_started_at; // 仅调试用
+        spawn_blocking(move || { // 仅调试用
+            std::thread::sleep(Duration::from_millis(25)); // 仅调试用
+            tracing::warn!( // 仅调试用
+                "Terminal spawn delayed snapshot pid={} elapsed_ms={} snapshot={} launch_detail={}", // 仅调试用
+                pid, // 仅调试用
+                delayed_probe_started_at.elapsed().as_millis(), // 仅调试用
+                spawn_process_snapshot(pid), // 仅调试用
+                launch_detail_for_probe.as_ref(), // 仅调试用
+            ); // 仅调试用
+        }); // 仅调试用
+    } // 仅调试用
     tracing::info!("Terminal created successfully with PID: {} ({})", pid, launch_detail.as_ref()); // 仅调试用
 
     let reader = match master.try_clone_reader() {

@@ -1,5 +1,7 @@
 mod lsp;
 mod exec_probe;
+mod exec_stage_probe;
+mod signal_catch_probe;
 mod signal_probe;
 mod terminal;
 mod updates;
@@ -8,6 +10,8 @@ mod utils;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use exec_probe::{run_exec_probe, ExecProbeOutcome};
+use exec_stage_probe::run_exec_stage_probe;
+use signal_catch_probe::run_signal_catch_probe;
 use lsp::{start_lsp_server, LspBridgeConfig};
 use signal_probe::run_signal_probe;
 use std::net::Ipv4Addr;
@@ -50,7 +54,28 @@ enum Commands {
         /// How long to arm the probe before exec'ing the wrapped command.
         #[arg(long, default_value_t = 40)]
         arm_ms: u64,
+        /// Keep the watched signal blocked across exec so the target can install its own handler first.
+        #[arg(long, default_value_t = false)]
+        preserve_blocked_on_exec: bool,
         /// Wrapped command to exec after the probe window expires.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Internal diagnostic target that installs a SIG54 handler immediately on process entry.
+    Sig54CatchProbe {
+        /// Signal number to block, unblock, and observe with a native handler.
+        #[arg(long, default_value_t = 54)]
+        signal: i32,
+        /// How long to wait for the handler to fire after unblocking the signal.
+        #[arg(long, default_value_t = 120)]
+        wait_ms: u64,
+    },
+    /// Internal diagnostic launcher that adds a second native exec milestone before bash.
+    ExecStageProbe {
+        /// Short label to identify which synthetic handoff window this stage belongs to.
+        #[arg(long, default_value = "unnamed")]
+        stage_label: String,
+        /// Wrapped command to exec after the stage wrapper has logged its own process state.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
@@ -74,6 +99,9 @@ enum Commands {
         /// Wrap each child with the sig54 probe before exec.
         #[arg(long, default_value_t = false)]
         wrap_sig54_probe: bool,
+        /// Keep SIG54 blocked across the sig54-probe -> target exec boundary.
+        #[arg(long, default_value_t = false)]
+        sig54_probe_preserve_blocked_on_exec: bool,
         /// Arm window for the optional sig54 probe.
         #[arg(long, default_value_t = 40)]
         arm_ms: u64,
@@ -192,14 +220,39 @@ async fn main() {
         Some(Commands::Sig54Probe {
             signal,
             arm_ms,
+            preserve_blocked_on_exec,
             command,
         }) => {
-            if let Err(error) = run_signal_probe(signal, arm_ms, command) {
+            if let Err(error) = run_signal_probe(signal, arm_ms, preserve_blocked_on_exec, command) {
                 eprintln!(
-                    "[sigprobe:error,pid={},signal={},arm_ms={},error={}]",
+                    "[sigprobe:error,pid={},signal={},arm_ms={},preserve_blocked_on_exec={},error={}]",
                     std::process::id(),
                     signal,
                     arm_ms,
+                    if preserve_blocked_on_exec { 1 } else { 0 },
+                    error,
+                );
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Sig54CatchProbe { signal, wait_ms }) => {
+            if let Err(error) = run_signal_catch_probe(signal, wait_ms) {
+                eprintln!(
+                    "[sigcatch:error,pid={},signal={},wait_ms={},error={}]",
+                    std::process::id(),
+                    signal,
+                    wait_ms,
+                    error,
+                );
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::ExecStageProbe { stage_label, command }) => {
+            if let Err(error) = run_exec_stage_probe(&stage_label, command) {
+                eprintln!(
+                    "[stageprobe:error,pid={},label={},error={}]",
+                    std::process::id(),
+                    stage_label,
                     error,
                 );
                 std::process::exit(1);
@@ -212,6 +265,7 @@ async fn main() {
             sample_rounds,
             sample_interval_ms,
             wrap_sig54_probe,
+            sig54_probe_preserve_blocked_on_exec,
             arm_ms,
             command,
         }) => match run_exec_probe(
@@ -221,6 +275,7 @@ async fn main() {
             sample_rounds,
             sample_interval_ms,
             wrap_sig54_probe,
+            sig54_probe_preserve_blocked_on_exec,
             arm_ms,
             command,
         ) {
