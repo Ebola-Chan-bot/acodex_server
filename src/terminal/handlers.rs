@@ -47,6 +47,34 @@ fn preview_bytes_for_debug(data: &[u8]) -> String { // 仅调试用
     } // 仅调试用
 } // 仅调试用
 
+fn describe_wait_semantics(exit_code: Option<i32>, wait_signal: Option<i32>) -> String { // 仅调试用
+    // Keep 182 interpretation in one place so the investigation stops treating
+    // `128 + 54` as automatic proof. We need to separate "wait observed SIG54"
+    // from "some inner layer returned a plain exit code 182" in every log line. 仅调试用
+    let inferred_signal = exit_code.and_then(|code| (code > 128).then_some(code - 128)); // 仅调试用
+    let termination_kind = if wait_signal.is_some() { // 仅调试用
+        "signaled" // 仅调试用
+    } else if exit_code.is_some() { // 仅调试用
+        "exited" // 仅调试用
+    } else { // 仅调试用
+        "unknown" // 仅调试用
+    }; // 仅调试用
+    let signal_consistency = match (wait_signal, inferred_signal) { // 仅调试用
+        (Some(wait), Some(inferred)) if wait == inferred => "match", // 仅调试用
+        (Some(_), Some(_)) => "mismatch", // 仅调试用
+        (Some(_), None) => "wait-only", // 仅调试用
+        (None, Some(_)) => "exit-only", // 仅调试用
+        (None, None) => "n/a", // 仅调试用
+    }; // 仅调试用
+    format!( // 仅调试用
+        "wait_semantics=termination_kind={} wait_signal={} inferred_signal={} signal_consistency={}", // 仅调试用
+        termination_kind, // 仅调试用
+        wait_signal.map(|signal| signal.to_string()).unwrap_or_else(|| "<none>".to_string()), // 仅调试用
+        inferred_signal.map(|signal| signal.to_string()).unwrap_or_else(|| "<none>".to_string()), // 仅调试用
+        signal_consistency, // 仅调试用
+    ) // 仅调试用
+} // 仅调试用
+
 pub struct TerminalSession {
     pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub child_killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
@@ -300,18 +328,27 @@ pub async fn create_terminal(
                             } // 仅调试用
                         }) // 仅调试用
                         .unwrap_or_else(|_| "<read_error>".to_string()); // 仅调试用
+                    let exit_code = Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX)); // 仅调试用
+                    let wait_signal = status.signal().and_then(|signal| signal.parse::<i32>().ok()); // 仅调试用
+                    let wait_semantics = describe_wait_semantics(exit_code, wait_signal); // 仅调试用
                     let exit_message = ProcessExitMessage { // 仅调试用
-                        exit_code: Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX)), // 仅调试用
-                        signal: status.signal().map(|signal| signal.to_string()), // 仅调试用
+                        exit_code, // 仅调试用
+                        signal: wait_signal.map(|signal| signal.to_string()), // 仅调试用
                         message: format!( // 仅调试用
-                            "wait_status={} runtime_ms={} launch_detail={} scrollback_preview={} io_stats={:?}", // 仅调试用
+                            "wait_status={} {} runtime_ms={} launch_detail={} scrollback_preview={} io_stats={:?}", // 仅调试用
                             status, // 仅调试用
+                            wait_semantics, // 仅调试用
                             runtime_ms, // 仅调试用
                             launch_detail_for_waiter.as_ref(), // 仅调试用
                             scrollback_preview, // 仅调试用
                             io_stats_for_waiter.lock().unwrap().clone(), // 仅调试用
                         ), // 仅调试用
                     }; // 仅调试用
+                    tracing::warn!( // 仅调试用
+                        "Terminal wait semantics pid={} {}", // 仅调试用
+                        pid, // 仅调试用
+                        wait_semantics, // 仅调试用
+                    ); // 仅调试用
                     // Keep a dedicated structured log here because the WebSocket exit event can be
                     // observed later than the child waiter and may be truncated or normalized by
                     // intermediate layers. This line preserves the exact backend-side exit detail
@@ -329,7 +366,7 @@ pub async fn create_terminal(
                     // /proc/self/status to identify who sent signal 54 and what the
                     // race condition involves.
                     if let Some(ec) = exit_message.exit_code { // 仅调试用
-                        if ec > 128 { // 仅调试用
+                        if ec > 128 || wait_signal.is_some() { // 仅调试用
                             let active_pids: Vec<u32> = sessions_for_waiter // 仅调试用
                                 .iter() // 仅调试用
                                 .map(|r| *r.key()) // 仅调试用
@@ -341,8 +378,8 @@ pub async fn create_terminal(
                                 .collect::<Vec<&str>>() // 仅调试用
                                 .join(" | "); // 仅调试用
                             tracing::warn!( // 仅调试用
-                                "Signal forensics pid={} exit_code={} concurrent_sessions={} active_pids={:?} axs_proc_status=[{}]", // 仅调试用
-                                pid, ec, sessions_for_waiter.len(), active_pids, axs_sig_status, // 仅调试用
+                                "Signal forensics pid={} exit_code={} wait_signal={:?} concurrent_sessions={} active_pids={:?} axs_proc_status=[{}]", // 仅调试用
+                                pid, ec, wait_signal, sessions_for_waiter.len(), active_pids, axs_sig_status, // 仅调试用
                             ); // 仅调试用
                         } // 仅调试用
                     } // 仅调试用
