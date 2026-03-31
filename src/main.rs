@@ -3,6 +3,7 @@ mod exec_probe;
 mod exec_stage_probe;
 mod signal_catch_probe;
 mod signal_probe;
+mod startup_replay_probe;
 mod terminal;
 mod updates;
 mod utils;
@@ -14,6 +15,7 @@ use exec_stage_probe::run_exec_stage_probe;
 use signal_catch_probe::run_signal_catch_probe;
 use lsp::{start_lsp_server, LspBridgeConfig};
 use signal_probe::run_signal_probe;
+use startup_replay_probe::run_startup_replay_probe;
 use std::net::Ipv4Addr;
 use std::env;
 use terminal::{set_default_command, start_server};
@@ -78,6 +80,12 @@ enum Commands {
         /// Wrapped command to exec after the stage wrapper has logged its own process state.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
+    },
+    /// Replay bash 5.3 early startup syscalls phase-by-phase to localize which one triggers 182.
+    StartupReplayProbe {
+        /// Signal number to monitor for pending/blocked state at each phase boundary.
+        #[arg(long, default_value_t = 54)]
+        signal: i32,
     },
     /// Repeatedly spawn a command under proot until a target exit code is observed.
     ExecProbe {
@@ -253,6 +261,17 @@ async fn main() {
                     "[stageprobe:error,pid={},label={},error={}]",
                     std::process::id(),
                     stage_label,
+                    error,
+                );
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::StartupReplayProbe { signal }) => {
+            if let Err(error) = run_startup_replay_probe(signal) {
+                eprintln!(
+                    "[replay:error,pid={},signal={},error={}]",
+                    std::process::id(),
+                    signal,
                     error,
                 );
                 std::process::exit(1);
