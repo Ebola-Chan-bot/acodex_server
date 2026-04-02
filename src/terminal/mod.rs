@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant; // 仅调试用
 use std::{io::ErrorKind, net::Ipv4Addr, sync::Arc};
+use std::io::Write;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -133,6 +134,21 @@ pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
                 server_started_at.elapsed().as_millis(), // 仅调试用
             ); // 仅调试用
             tracing::info!("listening on {}", listener.local_addr().unwrap());
+
+            // Notify parent process via FIFO that the server is ready to accept
+            // connections. The parent shell creates a named pipe and sets
+            // AXS_READY_PIPE; we write "READY\n" and close. The parent's blocking
+            // `read` returns immediately — no HTTP polling needed.
+            if let Ok(pipe_path) = env::var("AXS_READY_PIPE") {
+                match std::fs::OpenOptions::new().write(true).open(&pipe_path) {
+                    Ok(mut f) => {
+                        let _ = f.write_all(b"READY\n");
+                    }
+                    Err(e) => {
+                        eprintln!("[axs:ready-pipe-error,path={},error={}]", pipe_path, e);
+                    }
+                }
+            }
 
             if let Err(e) = axum::serve(listener, app).await {
                 eprintln!( // 仅调试用

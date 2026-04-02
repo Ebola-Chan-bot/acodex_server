@@ -467,17 +467,14 @@ pub fn fallback_open_and_spawn(
                     libc::signal(*signo, libc::SIG_DFL);
                 }
 
-                // Block (not ignore) signal 54 to keep bash alive for signal state
-                // inspection from initrc. Under proot ptrace, concurrent PTY sessions
-                // cause signal 54 to arrive during bash's first ~6ms, killing it with
-                // exit 182 (128+54). Blocking defers delivery: if initrc reads
-                // /proc/self/status SigPnd and bit 53 is set, the signal was sent.
-                // SIG_SETMASK clears all inherited blocks, then adds only signal 54.
-                // Diagnostic-only — will be replaced once signal source is identified.
-                let mut diag_mask: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut diag_mask);
-                libc::sigaddset(&mut diag_mask, 54);
-                libc::sigprocmask(libc::SIG_SETMASK, &diag_mask, std::ptr::null_mut());
+                // Signal 54 (SIGRTMIN+20) under proot ptrace kills bash during its
+                // first ~7ms. Previously blocked here, but blocking is futile because
+                // bash resets its signal mask on startup. The frontend now retries
+                // terminal sessions that exit with code 182, making blocking unnecessary.
+                // Clear all inherited signal blocks so bash starts with a clean mask.
+                let mut empty_mask: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut empty_mask);
+                libc::sigprocmask(libc::SIG_SETMASK, &empty_mask, std::ptr::null_mut());
 
                 // New session
                 if libc::setsid() == -1 {
@@ -520,7 +517,7 @@ pub fn fallback_open_and_spawn(
                     let setpgrp_rc = libc::tcsetpgrp(0, mypid);
                     if setpgrp_rc == 0 {
                         // 仅调试用: 这里必须与字面量真实长度一致；之前多写 1 字节会把相邻内存里的杂字节带进首帧，污染 182 退出样本。
-                        let _ = libc::write(2, b",setpg=ok,sig54=blk]\n".as_ptr() as *const _, 21); // 仅调试用
+                        let _ = libc::write(2, b",setpg=ok,sig54=dfl]\n".as_ptr() as *const _, 21); // 仅调试用
                     } else {
                         let errno = *libc::__errno_location();
                         let _ = libc::write(2, b",setpg=e".as_ptr() as *const _, 8);
