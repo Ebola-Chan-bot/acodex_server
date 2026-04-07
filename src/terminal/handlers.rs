@@ -222,8 +222,29 @@ pub async fn create_terminal(
 
     // --- Common session setup ---
     let pid = child.process_id().unwrap_or(0);
+    let axs_proc_signal_state = std::fs::read_to_string("/proc/self/status") // 仅调试用
+        .unwrap_or_default() // 仅调试用
+        .lines() // 仅调试用
+        .filter(|line| { // 仅调试用
+            line.starts_with("Name") // 仅调试用
+                || line.starts_with("Pid") // 仅调试用
+                || line.starts_with("PPid") // 仅调试用
+                || line.starts_with("Tgid") // 仅调试用
+                || line.starts_with("SigPnd") // 仅调试用
+                || line.starts_with("ShdPnd") // 仅调试用
+                || line.starts_with("SigBlk") // 仅调试用
+                || line.starts_with("SigIgn") // 仅调试用
+                || line.starts_with("SigCgt") // 仅调试用
+        }) // 仅调试用
+        .collect::<Vec<&str>>() // 仅调试用
+        .join(" | "); // 仅调试用
+    let child_spawn_snapshot = if pid != 0 { // 仅调试用
+        spawn_process_snapshot(pid) // 仅调试用
+    } else { // 仅调试用
+        String::from("<pid=0>") // 仅调试用
+    }; // 仅调试用
     let launch_detail = Arc::new(format!( // 仅调试用
-        "default_command={} program={} args={} pty_backend={} openpty_error={} backend_detail={} cols={} rows={} launch_elapsed_ms={}", // 仅调试用
+        "default_command={} program={} args={} pty_backend={} openpty_error={} backend_detail={} cols={} rows={} launch_elapsed_ms={} axs_proc_signals=[{}] child_spawn_snapshot=[{}]", // 仅调试用
         get_default_command().unwrap_or("<none>"), // 仅调试用
         program, // 仅调试用
         serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string()), // 仅调试用
@@ -233,6 +254,8 @@ pub async fn create_terminal(
         cols, // 仅调试用
         rows, // 仅调试用
         launch_started_at.elapsed().as_millis(), // 仅调试用
+        axs_proc_signal_state, // 仅调试用
+        child_spawn_snapshot, // 仅调试用
     )); // 仅调试用
     if pid != 0 { // 仅调试用
         tracing::warn!( // 仅调试用
