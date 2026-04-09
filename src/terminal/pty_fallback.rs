@@ -1,4 +1,4 @@
-//! Fallback PTY implementation using the Linux TIOCGPTPEER ioctl.
+﻿//! Fallback PTY implementation using the Linux TIOCGPTPEER ioctl.
 //!
 //! When the standard `openpty()` path fails — typically because SELinux blocks
 //! `open("/dev/pts/N")` — this module creates the master/slave pair via
@@ -10,21 +10,8 @@ use portable_pty::{Child, MasterPty, PtySize};
 use std::cell::RefCell;
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::thread; // 仅调试用
-use std::time::Duration; // 仅调试用
 
-fn describe_pts_fd(fd: RawFd) -> String {
-    let mut buffer = [0u8; 128]; // 仅调试用
-    let rc = unsafe { libc::ptsname_r(fd, buffer.as_mut_ptr() as *mut _, buffer.len()) }; // 仅调试用
-    if rc != 0 { // 仅调试用
-        return format!("ptsname_r_error={:?}", io::Error::from_raw_os_error(rc)); // 仅调试用
-    } // 仅调试用
-    let nul = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len()); // 仅调试用
-    format!( // 仅调试用
-        "pts_name={}", // 仅调试用
-        String::from_utf8_lossy(&buffer[..nul]) // 仅调试用
-    ) // 仅调试用
-}
+
 
 /// `TIOCGPTPEER` — obtain the slave fd directly from the master fd.
 /// Defined in `<linux/tty.h>` as `_IO('T', 0x41)` = `0x5441`.
@@ -88,107 +75,8 @@ impl Read for OwnedFd {
     }
 }
 
-fn summarize_proc_cmdline(bytes: &[u8]) -> String { // 仅调试用
-    let parts = bytes // 仅调试用
-        .split(|byte| *byte == 0) // 仅调试用
-        .filter(|part| !part.is_empty()) // 仅调试用
-        .map(|part| String::from_utf8_lossy(part).into_owned()) // 仅调试用
-        .collect::<Vec<_>>(); // 仅调试用
-    if parts.is_empty() { // 仅调试用
-        return String::from("<empty>"); // 仅调试用
-    } // 仅调试用
-    parts.join(" ") // 仅调试用
-} // 仅调试用
 
-fn collect_child_proc_snapshot(pid: u32) -> String { // 仅调试用
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")) // 仅调试用
-        .map(|status| { // 仅调试用
-            status // 仅调试用
-                .lines() // 仅调试用
-                .filter(|line| { // 仅调试用
-                    line.starts_with("Name") // 仅调试用
-                        || line.starts_with("State") // 仅调试用
-                        || line.starts_with("Tgid") // 仅调试用
-                        || line.starts_with("Pid") // 仅调试用
-                        || line.starts_with("PPid") // 仅调试用
-                        || line.starts_with("TracerPid") // 仅调试用
-                        || line.starts_with("SigQ") // 仅调试用
-                        || line.starts_with("SigPnd") // 仅调试用
-                        || line.starts_with("ShdPnd") // 仅调试用
-                        || line.starts_with("SigBlk") // 仅调试用
-                        || line.starts_with("SigIgn") // 仅调试用
-                        || line.starts_with("SigCgt") // 仅调试用
-                }) // 仅调试用
-                .collect::<Vec<_>>() // 仅调试用
-                .join(" | ") // 仅调试用
-        }) // 仅调试用
-        .unwrap_or_else(|error| format!("<status_error={error}>")); // 仅调试用
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")) // 仅调试用
-        .map(|bytes| summarize_proc_cmdline(&bytes)) // 仅调试用
-        .unwrap_or_else(|error| format!("<cmdline_error={error}>")); // 仅调试用
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe")) // 仅调试用
-        .map(|path| path.display().to_string()) // 仅调试用
-        .unwrap_or_else(|error| format!("<exe_error={error}>")); // 仅调试用
-    format!("exe={} cmdline={} [{}]", exe, cmdline, status) // 仅调试用
-} // 仅调试用
 
-fn spawn_child_status_probe(pid: u32) { // 仅调试用
-    tracing::warn!( // 仅调试用
-        "PTY child early-status armed pid={} rounds=6 interval_ms=2 revision=20260327b", // 仅调试用
-        pid, // 仅调试用
-    ); // 仅调试用
-    thread::spawn(move || { // 仅调试用
-        for round in 1..=6 { // 仅调试用
-            let status_path = format!("/proc/{pid}/status"); // 仅调试用
-            match std::fs::read_to_string(&status_path) { // 仅调试用
-                Ok(status) => { // 仅调试用
-                    let snapshot = status // 仅调试用
-                        .lines() // 仅调试用
-                        .filter(|line| { // 仅调试用
-                            line.starts_with("Name") // 仅调试用
-                                || line.starts_with("State") // 仅调试用
-                                || line.starts_with("Tgid") // 仅调试用
-                                || line.starts_with("Pid") // 仅调试用
-                                || line.starts_with("PPid") // 仅调试用
-                                || line.starts_with("TracerPid") // 仅调试用
-                                || line.starts_with("SigQ") // 仅调试用
-                                || line.starts_with("SigPnd") // 仅调试用
-                                || line.starts_with("ShdPnd") // 仅调试用
-                                || line.starts_with("SigBlk") // 仅调试用
-                                || line.starts_with("SigIgn") // 仅调试用
-                                || line.starts_with("SigCgt") // 仅调试用
-                        }) // 仅调试用
-                        .collect::<Vec<_>>() // 仅调试用
-                        .join(" | "); // 仅调试用
-                    tracing::warn!( // 仅调试用
-                        "PTY child early-status pid={} round={} {}", // 仅调试用
-                        pid, // 仅调试用
-                        round, // 仅调试用
-                        collect_child_proc_snapshot(pid), // 仅调试用
-                    ); // 仅调试用
-                } // 仅调试用
-                Err(error) if error.kind() == io::ErrorKind::NotFound => { // 仅调试用
-                    tracing::warn!( // 仅调试用
-                        "PTY child early-status pid={} round={} proc-missing", // 仅调试用
-                        pid, // 仅调试用
-                        round, // 仅调试用
-                    ); // 仅调试用
-                    break; // 仅调试用
-                } // 仅调试用
-                Err(error) => { // 仅调试用
-                    tracing::warn!( // 仅调试用
-                        "PTY child early-status pid={} round={} read_error={}", // 仅调试用
-                        pid, // 仅调试用
-                        round, // 仅调试用
-                        error, // 仅调试用
-                    ); // 仅调试用
-                    break; // 仅调试用
-                } // 仅调试用
-            } // 仅调试用
-            thread::sleep(Duration::from_millis(2)); // 仅调试用
-        } // 仅调试用
-    }); // 仅调试用
-} // 仅调试用
 
 impl Write for OwnedFd {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -358,16 +246,9 @@ pub fn fallback_open_and_spawn(
     size: PtySize,
     program: &str,
     args: &[String],
-) -> anyhow::Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>, String)> {
+) -> anyhow::Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
     use std::os::unix::process::CommandExt;
 
-    tracing::info!( // 仅调试用
-        "fallback_open_and_spawn start program={} args={:?} rows={} cols={}", // 仅调试用
-        program, // 仅调试用
-        args, // 仅调试用
-        size.rows, // 仅调试用
-        size.cols, // 仅调试用
-    ); // 仅调试用
 
     // 1. Open master PTY
     let master_fd = unsafe { libc::open(c"/dev/ptmx".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
@@ -375,17 +256,14 @@ pub fn fallback_open_and_spawn(
         bail!("open(/dev/ptmx) failed: {:?}", io::Error::last_os_error());
     }
     let master = OwnedFd(master_fd);
-    tracing::info!("fallback_open_and_spawn open_ptmx master_fd={}", master.as_raw_fd()); // 仅调试用
 
     // 2. Grant & unlock
     if unsafe { libc::grantpt(master.as_raw_fd()) } != 0 {
         bail!("grantpt failed: {:?}", io::Error::last_os_error());
     }
-    tracing::info!("fallback_open_and_spawn grantpt_ok master_fd={}", master.as_raw_fd()); // 仅调试用
     if unsafe { libc::unlockpt(master.as_raw_fd()) } != 0 {
         bail!("unlockpt failed: {:?}", io::Error::last_os_error());
     }
-    tracing::info!("fallback_open_and_spawn unlockpt_ok master_fd={}", master.as_raw_fd()); // 仅调试用
 
     // 3. Obtain slave fd via TIOCGPTPEER (bypasses /dev/pts)
     let slave_fd = unsafe {
@@ -401,16 +279,6 @@ pub fn fallback_open_and_spawn(
             io::Error::last_os_error()
         );
     }
-    let fallback_detail = format!( // 仅调试用
-        "master_fd={} slave_fd={} {}", // 仅调试用
-        master.as_raw_fd(), // 仅调试用
-        slave_fd, // 仅调试用
-        describe_pts_fd(master.as_raw_fd()), // 仅调试用
-    ); // 仅调试用
-    tracing::info!( // 仅调试用
-        "fallback_open_and_spawn tiocgptpeer_ok {}", // 仅调试用
-        fallback_detail, // 仅调试用
-    ); // 仅调试用
 
     // 4. Set window size (non-fatal — the first resize from the client will
     //    correct it anyway, so we only log on failure rather than aborting).
@@ -445,7 +313,6 @@ pub fn fallback_open_and_spawn(
         (stdin, stdout, stderr)
         // `slave` (OwnedFd) is dropped here, closing the original slave_fd.
     };
-    tracing::info!("fallback_open_and_spawn dup_stdio_ok {}", fallback_detail); // 仅调试用
 
     // 6. Spawn command
     let mut cmd = std::process::Command::new(program);
@@ -489,53 +356,6 @@ pub fn fallback_open_and_spawn(
 
                 cloexec_fds_above_stderr();
 
-                // 仅调试用: async-signal-safe diagnostic marker written to PTY.
-                // Verifies the slave-to-master link is functional: if this appears
-                // in the scrollback after an immediate exit (e.g. exit_code=182),
-                // the PTY pair works and the problem is in bash initialization;
-                // if scrollback is empty, the PTY link is broken under proot.
-                {
-                    let is_tty = libc::isatty(0);
-                    let pgrp = libc::tcgetpgrp(0);
-                    if is_tty == 1 {
-                        let _ = libc::write(2, b"[axs:tty=y".as_ptr() as *const _, 10);
-                    } else {
-                        let _ = libc::write(2, b"[axs:tty=n".as_ptr() as *const _, 10);
-                    }
-                    if pgrp >= 0 {
-                        let _ = libc::write(2, b",pgrp=ok".as_ptr() as *const _, 8);
-                    } else {
-                        let _ = libc::write(2, b",pgrp=er".as_ptr() as *const _, 8);
-                    }
-
-                    // 仅调试用: 测试 tcsetpgrp — bash 启动时会调用此操作做 job control
-                    // 初始化。已排除 tcsetpgrp 为崩溃根因：日志显示 setpg=ok 但 bash 仍以
-                    // exit_code=182 退出。根因已确认为 proot loader 的 MAP_FIXED 地址冲突
-                    // （已在 proot 侧通过 fixup_load_addresses 修复）。
-                    // 此探针保留用于回归验证。
-                    let mypid = libc::getpid();
-                    let setpgrp_rc = libc::tcsetpgrp(0, mypid);
-                    if setpgrp_rc == 0 {
-                        // 仅调试用: 这里必须与字面量真实长度一致；之前多写 1 字节会把相邻内存里的杂字节带进首帧，污染 182 退出样本。
-                        let _ = libc::write(2, b",setpg=ok,sig54=dfl]\n".as_ptr() as *const _, 21); // 仅调试用
-                    } else {
-                        let errno = *libc::__errno_location();
-                        let _ = libc::write(2, b",setpg=e".as_ptr() as *const _, 8);
-                        // Write errno as decimal digits (async-signal-safe)
-                        let mut buf = [0u8; 4];
-                        let mut val = errno as u32;
-                        let mut pos = buf.len();
-                        loop {
-                            pos -= 1;
-                            buf[pos] = b'0' + (val % 10) as u8;
-                            val /= 10;
-                            if val == 0 { break; }
-                        }
-                        let _ = libc::write(2, buf[pos..].as_ptr() as *const _, (buf.len() - pos) as _);
-                        let _ = libc::write(2, b"]\n".as_ptr() as *const _, 2);
-                    }
-                }
-
                 Ok(())
             });
     }
@@ -543,21 +363,7 @@ pub fn fallback_open_and_spawn(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("spawn '{}' failed: {}", program, e))?;
-    tracing::info!( // 仅调试用
-        "fallback_open_and_spawn spawn_ok child_pid={:?} {}", // 仅调试用
-        child.process_id(), // 仅调试用
-        fallback_detail, // 仅调试用
-    ); // 仅调试用
-    // 仅调试用: exit 182 根因已修复（proot fixup_load_addresses），但保留此
     // 探针用于回归验证。抓取子进程刚 spawn 后的 /proc/<pid>/status 快照。
-    if let Some(child_pid) = child.process_id() { // 仅调试用
-        tracing::warn!( // 仅调试用
-            "PTY child immediate-snapshot pid={} {}", // 仅调试用
-            child_pid, // 仅调试用
-            collect_child_proc_snapshot(child_pid), // 仅调试用
-        ); // 仅调试用
-        spawn_child_status_probe(child_pid); // 仅调试用
-    } // 仅调试用
 
     // Detach child stdio handles (master side is our I/O path)
     child.stdin.take();
@@ -569,5 +375,5 @@ pub fn fallback_open_and_spawn(
         took_writer: RefCell::new(false),
     };
 
-    Ok((Box::new(master_pty), Box::new(child), fallback_detail))
+    Ok((Box::new(master_pty), Box::new(child)))
 }
