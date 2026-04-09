@@ -468,9 +468,9 @@ pub fn fallback_open_and_spawn(
                 }
 
                 // Signal 54 (SIGRTMIN+20) under proot ptrace kills bash during its
-                // first ~7ms. Previously blocked here, but blocking is futile because
-                // bash resets its signal mask on startup. The frontend now retries
-                // terminal sessions that exit with code 182, making blocking unnecessary.
+                // first ~7ms. The root cause (loader MAP_FIXED on occupied addresses)
+                // has been fixed in proot via fixup_load_addresses. Exit 182 is now
+                // treated as an unexpected fatal error by the frontend.
                 // Clear all inherited signal blocks so bash starts with a clean mask.
                 let mut empty_mask: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut empty_mask);
@@ -510,8 +510,8 @@ pub fn fallback_open_and_spawn(
 
                     // 仅调试用: 测试 tcsetpgrp — bash 启动时会调用此操作做 job control
                     // 初始化。已排除 tcsetpgrp 为崩溃根因：日志显示 setpg=ok 但 bash 仍以
-                    // exit_code=182 退出。根因是 proot ptrace 下并发 PTY 时 signal 54 被递送
-                    // 到 bash（已在上方通过 SIG_BLOCK 阻塞，待诊断确认来源后处理）。
+                    // exit_code=182 退出。根因已确认为 proot loader 的 MAP_FIXED 地址冲突
+                    // （已在 proot 侧通过 fixup_load_addresses 修复）。
                     // 此探针保留用于回归验证。
                     let mypid = libc::getpid();
                     let setpgrp_rc = libc::tcsetpgrp(0, mypid);
@@ -548,10 +548,8 @@ pub fn fallback_open_and_spawn(
         child.process_id(), // 仅调试用
         fallback_detail, // 仅调试用
     ); // 仅调试用
-    // 仅调试用: 现有证据显示 child 已带着 `sig54=blk` 进入 bash 早期窗口，
-    // 但仍可能在约 7ms 内直接退出 182。这里从父进程侧抓取前几毫秒的
-    // /proc/<pid>/status，确认失败样本是否真的出现 SigPnd/SigBlk 变化，
-    // 避免继续把旧的 signal 54 假设当成既定事实。
+    // 仅调试用: exit 182 根因已修复（proot fixup_load_addresses），但保留此
+    // 探针用于回归验证。抓取子进程刚 spawn 后的 /proc/<pid>/status 快照。
     if let Some(child_pid) = child.process_id() { // 仅调试用
         tracing::warn!( // 仅调试用
             "PTY child immediate-snapshot pid={} {}", // 仅调试用

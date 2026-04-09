@@ -90,9 +90,9 @@ fn spawn_process_snapshot(pid: u32) -> String { // 仅调试用
 } // 仅调试用
 
 fn describe_wait_semantics(exit_code: Option<i32>, wait_signal: Option<i32>) -> String { // 仅调试用
-    // Keep 182 interpretation in one place so the investigation stops treating
-    // `128 + 54` as automatic proof. We need to separate "wait observed SIG54"
-    // from "some inner layer returned a plain exit code 182" in every log line. 仅调试用
+    // Exit 182 = proot loader FATAL (MAP_FIXED failed). Root cause fixed in proot
+    // (fixup_load_addresses). If 182 still appears, it is unexpected. This function
+    // separates "wait observed signal" from "plain exit code" for diagnostics. 仅调试用
     let inferred_signal = exit_code.and_then(|code| (code > 128).then_some(code - 128)); // 仅调试用
     let termination_kind = if wait_signal.is_some() { // 仅调试用
         "signaled" // 仅调试用
