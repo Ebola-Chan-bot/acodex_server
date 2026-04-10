@@ -60,8 +60,7 @@ impl Scrollback {
 
             // WebSocket replay must activate live forwarding before releasing the scrollback
             // lock. Otherwise the PTY reader can append the same early output to scrollback,
-            // replay it, and then forward it live again, which is exactly how the first MOTD
-            // ended up duplicated in Terminal 1.
+            // replay it, and then forward it live again — duplicating early output.
             let result = then();
             Ok((buf, result))
         } else {

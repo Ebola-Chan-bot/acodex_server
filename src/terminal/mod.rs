@@ -13,9 +13,7 @@ use axum::{
 use axum::http::HeaderValue;
 use dashmap::DashMap;
 use std::env;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Instant; // 仅调试用
 use std::{io::ErrorKind, net::Ipv4Addr, sync::Arc};
 use std::io::Write;
 use tower_http::cors::{Any, CorsLayer};
@@ -26,8 +24,6 @@ use handlers::*;
 use types::Sessions;
 
 static DEFAULT_COMMAND: OnceLock<String> = OnceLock::new();
-static STATUS_HIT_LOGGED: AtomicBool = AtomicBool::new(false); // 仅调试用
-static ROOT_HIT_LOGGED: AtomicBool = AtomicBool::new(false); // 仅调试用
 
 pub fn set_default_command(cmd: String) {
     let _ = DEFAULT_COMMAND.set(cmd);
@@ -49,16 +45,6 @@ fn should_enable_terminal_tracing() -> bool {
 }
 
 pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
-    let server_started_at = Instant::now(); // 仅调试用
-    eprintln!( // 仅调试用
-        "[axs:start-server-begin,pid={},host={},port={},allow_any_origin={},default_command={}]", // 仅调试用
-        std::process::id(), // 仅调试用
-        host, // 仅调试用
-        port, // 仅调试用
-        allow_any_origin, // 仅调试用
-        get_default_command().unwrap_or("<none>"), // 仅调试用
-    ); // 仅调试用
-
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "off".into());
 
@@ -93,9 +79,6 @@ pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
 
     let app = Router::new()
         .route("/", get(|| async {
-            if !ROOT_HIT_LOGGED.swap(true, Ordering::Relaxed) { // 仅调试用
-                eprintln!("[axs:root-first-hit,pid={}]", std::process::id()); // 仅调试用
-            } // 仅调试用
             "Rust based AcodeX server"
         }))
         .route("/terminals", post(create_terminal))
@@ -103,19 +86,6 @@ pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
         .route("/terminals/{pid}", get(terminal_websocket))
         .route("/terminals/{pid}/terminate", post(terminate_terminal))
         .route("/execute-command", post(execute_command))
-        .route("/status", get({ // 仅调试用
-            let server_started_at = server_started_at; // 仅调试用
-            move || async move { // 仅调试用
-                if !STATUS_HIT_LOGGED.swap(true, Ordering::Relaxed) { // 仅调试用
-                    eprintln!( // 仅调试用
-                        "[axs:status-first-hit,pid={},elapsed_ms={}]", // 仅调试用
-                        std::process::id(), // 仅调试用
-                        server_started_at.elapsed().as_millis(), // 仅调试用
-                    ); // 仅调试用
-                } // 仅调试用
-                "OK" // 仅调试用
-            } // 仅调试用
-        })) // 仅调试用
         .with_state(sessions)
         .layer(cors)
         .layer(
@@ -127,12 +97,6 @@ pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
 
     match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {
-            eprintln!( // 仅调试用
-                "[axs:bind-ok,pid={},addr={},elapsed_ms={}]", // 仅调试用
-                std::process::id(), // 仅调试用
-                listener.local_addr().unwrap(), // 仅调试用
-                server_started_at.elapsed().as_millis(), // 仅调试用
-            ); // 仅调试用
             tracing::info!("listening on {}", listener.local_addr().unwrap());
 
             // Notify parent process via FIFO that the server is ready to accept
@@ -151,21 +115,10 @@ pub async fn start_server(host: Ipv4Addr, port: u16, allow_any_origin: bool) {
             }
 
             if let Err(e) = axum::serve(listener, app).await {
-                eprintln!( // 仅调试用
-                    "[axs:serve-error,pid={},error={}]", // 仅调试用
-                    std::process::id(), // 仅调试用
-                    e, // 仅调试用
-                ); // 仅调试用
                 tracing::error!("Server error: {}", e);
             }
         }
         Err(e) => {
-            eprintln!( // 仅调试用
-                "[axs:bind-failed,pid={},kind={:?},error={}]", // 仅调试用
-                std::process::id(), // 仅调试用
-                e.kind(), // 仅调试用
-                e, // 仅调试用
-            ); // 仅调试用
             if e.kind() == ErrorKind::AddrInUse {
                 tracing::error!("Port is already in use please kill all other instances of axs server or stop any other process or app that maybe be using port {}", port);
             } else {

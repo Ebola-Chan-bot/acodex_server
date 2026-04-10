@@ -334,10 +334,6 @@ pub fn fallback_open_and_spawn(
                     libc::signal(*signo, libc::SIG_DFL);
                 }
 
-                // Signal 54 (SIGRTMIN+20) under proot ptrace kills bash during its
-                // first ~7ms. The root cause (loader MAP_FIXED on occupied addresses)
-                // has been fixed in proot via fixup_load_addresses. Exit 182 is now
-                // treated as an unexpected fatal error by the frontend.
                 // Clear all inherited signal blocks so bash starts with a clean mask.
                 let mut empty_mask: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut empty_mask);
@@ -363,7 +359,6 @@ pub fn fallback_open_and_spawn(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("spawn '{}' failed: {}", program, e))?;
-    // 探针用于回归验证。抓取子进程刚 spawn 后的 /proc/<pid>/status 快照。
 
     // Detach child stdio handles (master side is our I/O path)
     child.stdin.take();
