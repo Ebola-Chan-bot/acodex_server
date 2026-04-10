@@ -398,7 +398,7 @@ pub fn run_exec_probe(
         }
 
         let started_at = Instant::now();
-        let mut child = Command::new(&wrapped_command[0])
+        let child = Command::new(&wrapped_command[0])
             .args(&wrapped_command[1..])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

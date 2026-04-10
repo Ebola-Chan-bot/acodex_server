@@ -101,7 +101,7 @@ pub async fn create_terminal(
                 e
             );
             match fallback_open_and_spawn(size, &program, &args) {
-                Ok((master, child, _)) => (master, child),
+                Ok((master, child)) => (master, child),
                 Err(fb_err) => {
                     tracing::error!("TIOCGPTPEER fallback also failed: {}", fb_err);
                     return Json(ErrorResponse {
